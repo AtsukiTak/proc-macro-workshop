@@ -34,6 +34,9 @@ pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
 
     let builder_field_impls: TokenStream = fields(&input).map(to_builder_field_impl).collect();
 
+    let builder_build_fn_impls: TokenStream =
+        fields(&input).map(to_builder_build_fn_impl).collect();
+
     let generated_token = quote! {
         pub struct #builder_name {
             #builder_fields
@@ -45,6 +48,12 @@ pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
                 #builder_name {
                     #builder_initial_fields
                 }
+            }
+
+            pub fn build(&mut self) -> Result<#struct_name, Box<dyn std::error::Error>> {
+                Ok(#struct_name {
+                    #builder_build_fn_impls
+                })
             }
 
             #builder_field_impls
@@ -101,5 +110,12 @@ fn to_builder_field_impl(field: syn::Field) -> TokenStream {
             self.#name = Some(item);
             self
         }
+    }
+}
+
+fn to_builder_build_fn_impl(field: syn::Field) -> TokenStream {
+    let name = field.ident.unwrap();
+    quote! {
+        #name: self.#name.take().ok_or(String::from("missing some fields"))?,
     }
 }

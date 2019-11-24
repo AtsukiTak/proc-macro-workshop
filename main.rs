@@ -9,7 +9,11 @@
 use derive_builder::Builder;
 
 #[derive(Builder)]
-pub struct Hoge {
-    hoge: String,
+pub struct Command {
+    executable: String,
+    args: Vec<String>,
+    env: Vec<String>,
+    current_dir: String,
 }
+
 fn main() {}
