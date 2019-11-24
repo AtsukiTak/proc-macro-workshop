@@ -27,7 +27,12 @@ pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
 
     let builder_name = format_ident!("{}Builder", struct_name);
 
-    let builder_fields = builder_fields(&input);
+    let builder_fields: TokenStream = fields(&input).map(to_builder_field).collect();
+
+    let builder_initial_fields: TokenStream =
+        fields(&input).map(to_builder_initial_field).collect();
+
+    let builder_field_impls: TokenStream = fields(&input).map(to_builder_field_impl).collect();
 
     let generated_token = quote! {
         pub struct #builder_name {
@@ -37,8 +42,12 @@ pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
 
         impl #builder_name {
             pub fn new() -> #builder_name {
-                #builder_name {}
+                #builder_name {
+                    #builder_initial_fields
+                }
             }
+
+            #builder_field_impls
         }
 
         impl #struct_name {
@@ -51,32 +60,46 @@ pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
     StdTokenStream::from(generated_token)
 }
 
-fn builder_fields(input: &DeriveInput) -> TokenStream {
+fn fields<'a>(input: &'a DeriveInput) -> impl Iterator<Item = syn::Field> + 'a {
     let data = match input.data {
         syn::Data::Struct(ref data) => data,
         _ => panic!("Builder derive only supports struct"),
     };
 
     match data.fields {
-        syn::Fields::Named(ref fields) => fields
-            .named
-            .iter()
-            .cloned()
-            .map(|field| {
-                let name = field.ident.unwrap();
-                let ty = field.ty;
-                if field.colon_token.is_some() {
-                    quote! {
-                        #name : Option<#ty>,
-                    }
-                } else {
-                    quote! {
-                        #name : Option<#ty>
-                    }
-                }
-            })
-            .map(TokenStream::from)
-            .collect(),
+        syn::Fields::Named(ref fields) => fields.named.iter().cloned(),
         _ => panic!("Builder derive only supports named fields"),
+    }
+}
+
+fn to_builder_field(field: syn::Field) -> TokenStream {
+    let name = field.ident.unwrap();
+    let ty = field.ty;
+    if field.colon_token.is_some() {
+        quote! {
+            #name : Option<#ty>,
+        }
+    } else {
+        quote! {
+            #name : Option<#ty>
+        }
+    }
+}
+
+fn to_builder_initial_field(field: syn::Field) -> TokenStream {
+    let name = field.ident.unwrap();
+    quote! {
+        #name: None,
+    }
+}
+
+fn to_builder_field_impl(field: syn::Field) -> TokenStream {
+    let name = field.ident.unwrap();
+    let ty = field.ty;
+    quote! {
+        fn #name(&mut self, item: #ty) -> &mut Self {
+            self.#name = Some(item);
+            self
+        }
     }
 }
