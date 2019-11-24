@@ -1,11 +1,12 @@
 extern crate proc_macro;
 
-use proc_macro::TokenStream;
+use proc_macro::TokenStream as StdTokenStream;
+use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{parse_macro_input, DeriveInput};
 
 #[proc_macro_derive(Builder)]
-pub fn derive(tokens: TokenStream) -> TokenStream {
+pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
     let input = parse_macro_input!(tokens as DeriveInput);
 
     // ```
@@ -22,13 +23,17 @@ pub fn derive(tokens: TokenStream) -> TokenStream {
     // それによって出力されるTokenは `stringリテラル` である。
     // そのため、`String` を型名が期待される位置にinterpolate
     // すると上記のようなエラーが出る。
-    let struct_name = input.ident;
+    let struct_name = &input.ident;
 
     let builder_name = format_ident!("{}Builder", struct_name);
 
+    let builder_fields = builder_fields(&input);
+
     let generated_token = quote! {
         pub struct #builder_name {
+            #builder_fields
         }
+
 
         impl #builder_name {
             pub fn new() -> #builder_name {
@@ -43,5 +48,35 @@ pub fn derive(tokens: TokenStream) -> TokenStream {
         }
     };
 
-    TokenStream::from(generated_token)
+    StdTokenStream::from(generated_token)
+}
+
+fn builder_fields(input: &DeriveInput) -> TokenStream {
+    let data = match input.data {
+        syn::Data::Struct(ref data) => data,
+        _ => panic!("Builder derive only supports struct"),
+    };
+
+    match data.fields {
+        syn::Fields::Named(ref fields) => fields
+            .named
+            .iter()
+            .cloned()
+            .map(|field| {
+                let name = field.ident.unwrap();
+                let ty = field.ty;
+                if field.colon_token.is_some() {
+                    quote! {
+                        #name : Option<#ty>,
+                    }
+                } else {
+                    quote! {
+                        #name : Option<#ty>
+                    }
+                }
+            })
+            .map(TokenStream::from)
+            .collect(),
+        _ => panic!("Builder derive only supports named fields"),
+    }
 }
