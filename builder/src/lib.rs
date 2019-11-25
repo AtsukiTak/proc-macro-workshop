@@ -55,6 +55,41 @@ fn origin_fields<'a>(input: &'a DeriveInput) -> impl Iterator<Item = syn::Field>
     }
 }
 
+/// Returns `AngleBracketedGenericArguments` which represents
+/// the `T` in `Option<T>` if given field is
+/// `Option<T>`.
+/// Note that this function only be able to identify
+/// if the type is written literally as `Option<T>` and not
+/// `std::option::Option<T>` or something like that.
+fn generics_of_option_type(field: &syn::Field) -> Option<syn::Type> {
+    // the `std` in `std::option::Option`.
+    let first_type_segment = match field.ty {
+        syn::Type::Path(ref path) => path.path.segments.first().unwrap(),
+        _ => return None,
+    };
+    if first_type_segment.ident == "Option" {
+        let generic_arg = match first_type_segment.arguments {
+            syn::PathArguments::AngleBracketed(ref args) => args.args.first().unwrap(),
+            _ => unreachable!(),
+        };
+        match generic_arg {
+            syn::GenericArgument::Type(ref ty) => Some(ty.clone()),
+            _ => unreachable!(),
+        }
+    } else {
+        return None;
+    }
+}
+
+/// This function returns `TokenStream` which represents
+/// a code such as
+/// ```ignore
+/// impl Command {
+///     fn builder() -> CommandBuilder {
+///         CommandBuilder::new()
+///     }
+/// }
+/// ```
 fn ts_origin_impl_builder_fn(input: &DeriveInput) -> TokenStream {
     let origin_name = origin_name(input);
     let builder_name = builder_name(input);
@@ -70,18 +105,31 @@ fn ts_origin_impl_builder_fn(input: &DeriveInput) -> TokenStream {
 
 /// This function returns `TokenStream` which represents
 /// a code such as
+///
 /// ```ignore
 /// struct CommandBuilder {
 ///     executable: Option<String>,
-///     args: Option<Vec<String>>,
+///     // optional field
+///     current_dir: Option<String>,
+/// }
+/// ```
+///
+/// Note that original `Command` struct is such as
+///
+/// ```ignore
+/// struct Command {
+///     executable: String,
+///     // optional field
+///     current_dir: Option<String>,
 /// }
 /// ```
 fn ts_builder_struct(input: &DeriveInput) -> TokenStream {
     let builder_name = builder_name(input);
     let builder_fields: TokenStream = origin_fields(input)
         .map(|field| {
-            let name = field.ident.unwrap();
-            let ty = field.ty;
+            let name = field.ident.as_ref().unwrap();
+            // `T` in `Option<T>` or just `T`.
+            let ty = generics_of_option_type(&field).unwrap_or(field.ty);
             quote! {
                 #name : Option<#ty>,
             }
@@ -102,7 +150,7 @@ fn ts_builder_struct(input: &DeriveInput) -> TokenStream {
 ///     pub fn new() -> CommandBuilder {
 ///         CommandBuilder {
 ///             executable: None,
-///             args: None,
+///             current_dir: None,
 ///         }
 ///     }
 /// }
@@ -140,8 +188,8 @@ fn ts_builder_impl_new_fn(input: &DeriveInput) -> TokenStream {
 ///         self
 ///     }
 ///
-///     pub fn args(&mut self, item: Vec<String>) -> &mut Self {
-///         self.args = Some(item);
+///     pub fn current_dir(&mut self, item: String) -> &mut Self {
+///         self.current_dir = Some(item);
 ///         self
 ///     }
 /// }
@@ -151,8 +199,9 @@ fn ts_builder_impl_fields_fn(input: &DeriveInput) -> TokenStream {
     let builder_name = builder_name(input);
     let builder_fn_fields: TokenStream = origin_fields(input)
         .map(|field| {
-            let name = field.ident.unwrap();
-            let ty = field.ty;
+            let name = field.ident.as_ref().unwrap();
+            // `T` when field type is `Option<T>` or `T`.
+            let ty = generics_of_option_type(&field).unwrap_or(field.ty);
             quote! {
                 pub fn #name(&mut self, item: #ty) -> &mut Self {
                     self.#name = Some(item);
@@ -182,10 +231,10 @@ fn ts_builder_impl_fields_fn(input: &DeriveInput) -> TokenStream {
 ///                 .executable
 ///                 .take()
 ///                 .ok_or(BuildError)?,
-///             args: self
-///                 .args
-///                 .take()
-///                 .ok_or(BuildError)?,
+///             // `current_dir` is optional field
+///             current_dir: self
+///                 .current_dir
+///                 .take(),
 ///         })
 ///     }
 /// }
@@ -195,9 +244,17 @@ fn ts_builder_impl_build_fn(input: &DeriveInput) -> TokenStream {
     let builder_name = builder_name(input);
     let builder_fn_inner: TokenStream = origin_fields(input)
         .map(|field| {
-            let name = field.ident.unwrap();
-            quote! {
-                #name: self.#name.take().ok_or(BuildError())?,
+            let name = field.ident.as_ref().unwrap();
+            if generics_of_option_type(&field).is_some() {
+                // optional field
+                quote! {
+                    #name: self.#name.take(),
+                }
+            } else {
+                // required field
+                quote! {
+                    #name: self.#name.take().ok_or(BuildError())?,
+                }
             }
         })
         .collect();
