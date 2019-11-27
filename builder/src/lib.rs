@@ -5,7 +5,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, DeriveInput};
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
     let input = parse_macro_input!(tokens as DeriveInput);
 
@@ -14,6 +14,7 @@ pub fn derive(tokens: StdTokenStream) -> StdTokenStream {
         ts_builder_struct(&input),
         ts_builder_impl_new_fn(&input),
         ts_builder_impl_fields_fn(&input),
+        ts_builder_impl_each_field_fn(&input),
         ts_builder_impl_build_fn(&input),
     ]
     .into_iter()
@@ -55,19 +56,18 @@ fn origin_fields<'a>(input: &'a DeriveInput) -> impl Iterator<Item = syn::Field>
     }
 }
 
-/// Returns `AngleBracketedGenericArguments` which represents
-/// the `T` in `Option<T>` if given field is
-/// `Option<T>`.
+/// Returns `Type` of `T` in `Option<T>` or `Vec<T>` or something
+/// like that.
 /// Note that this function only be able to identify
-/// if the type is written literally as `Option<T>` and not
-/// `std::option::Option<T>` or something like that.
-fn generics_of_option_type(field: &syn::Field) -> Option<syn::Type> {
+/// if the type is written literally as `Option<T>`,
+/// and not `std::option::Option<T>` or something like that.
+fn single_generic_type_of(field: &syn::Field, type_name: &str) -> Option<syn::Type> {
     // the `std` in `std::option::Option`.
     let first_type_segment = match field.ty {
         syn::Type::Path(ref path) => path.path.segments.first().unwrap(),
         _ => return None,
     };
-    if first_type_segment.ident == "Option" {
+    if first_type_segment.ident == type_name {
         let generic_arg = match first_type_segment.arguments {
             syn::PathArguments::AngleBracketed(ref args) => args.args.first().unwrap(),
             _ => unreachable!(),
@@ -79,6 +79,39 @@ fn generics_of_option_type(field: &syn::Field) -> Option<syn::Type> {
     } else {
         return None;
     }
+}
+
+fn is_path_eq(path: &syn::Path, expected: &str) -> bool {
+    path.get_ident().map(|id| id == expected).unwrap_or(false)
+}
+
+/// Look for `#[builder(...)]` attribues and get the value and
+/// return the `TokenStream` inside ().
+fn get_builder_meta_items<'a>(field: &'a syn::Field) -> impl Iterator<Item = syn::NestedMeta> + 'a {
+    field
+        .attrs
+        .iter()
+        .filter(|attr| is_path_eq(&attr.path, "builder"))
+        .flat_map(|attr| match attr.parse_meta() {
+            Ok(syn::Meta::List(meta)) => meta.nested.into_iter(),
+            _ => panic!("Unsupported attribute format"),
+        })
+}
+
+/// Look for `#[builder(each = "...")]` attribute and get the
+/// value of "...".
+fn builder_attr_each(field: &syn::Field) -> Option<syn::LitStr> {
+    get_builder_meta_items(field).find_map(|meta| match meta {
+        syn::NestedMeta::Meta(syn::Meta::NameValue(syn::MetaNameValue {
+            ref path,
+            lit: syn::Lit::Str(ref s),
+            ..
+        })) if is_path_eq(path, "each") => Some(s.clone()),
+        i => {
+            eprintln!("{:#?}", i);
+            None
+        }
+    })
 }
 
 /// This function returns `TokenStream` which represents
@@ -119,6 +152,8 @@ fn ts_origin_impl_builder_fn(input: &DeriveInput) -> TokenStream {
 /// ```ignore
 /// struct Command {
 ///     executable: String,
+///     // multiple value field
+///     args: Vec<String>,
 ///     // optional field
 ///     current_dir: Option<String>,
 /// }
@@ -128,10 +163,19 @@ fn ts_builder_struct(input: &DeriveInput) -> TokenStream {
     let builder_fields: TokenStream = origin_fields(input)
         .map(|field| {
             let name = field.ident.as_ref().unwrap();
-            // `T` in `Option<T>` or just `T`.
-            let ty = generics_of_option_type(&field).unwrap_or(field.ty);
-            quote! {
-                #name : Option<#ty>,
+            if let Some(ty) = single_generic_type_of(&field, "Option") {
+                quote! {
+                    #name: Option<#ty>,
+                }
+            } else if let Some(ty) = single_generic_type_of(&field, "Vec") {
+                quote! {
+                    #name: Vec<#ty>,
+                }
+            } else {
+                let ty = field.ty;
+                quote! {
+                    #name : Option<#ty>,
+                }
             }
         })
         .collect();
@@ -160,9 +204,15 @@ fn ts_builder_impl_new_fn(input: &DeriveInput) -> TokenStream {
     let builder_name = builder_name(input);
     let builder_initial_fields: TokenStream = origin_fields(input)
         .map(|field| {
-            let name = field.ident.unwrap();
-            quote! {
-                #name: None,
+            let name = field.ident.as_ref().unwrap();
+            if single_generic_type_of(&field, "Vec").is_some() {
+                quote! {
+                    #name: Vec::new(),
+                }
+            } else {
+                quote! {
+                    #name: None,
+                }
             }
         })
         .collect();
@@ -178,7 +228,6 @@ fn ts_builder_impl_new_fn(input: &DeriveInput) -> TokenStream {
     }
 }
 
-///
 /// This function returns `TokenStream` which represents
 /// a code such as
 /// ```ignore
@@ -194,18 +243,34 @@ fn ts_builder_impl_new_fn(input: &DeriveInput) -> TokenStream {
 ///     }
 /// }
 /// ```
-///
 fn ts_builder_impl_fields_fn(input: &DeriveInput) -> TokenStream {
     let builder_name = builder_name(input);
     let builder_fn_fields: TokenStream = origin_fields(input)
+        .filter(|field| {
+            // #[builder(each = "...")] の値と同じ場合はスキップする
+            match builder_attr_each(field) {
+                Some(ref s) => *field.ident.as_ref().unwrap() != s.value(),
+                _ => true,
+            }
+        })
         .map(|field| {
             let name = field.ident.as_ref().unwrap();
             // `T` when field type is `Option<T>` or `T`.
-            let ty = generics_of_option_type(&field).unwrap_or(field.ty);
-            quote! {
-                pub fn #name(&mut self, item: #ty) -> &mut Self {
-                    self.#name = Some(item);
-                    self
+            if single_generic_type_of(&field, "Vec").is_some() {
+                let ty = field.ty;
+                quote! {
+                    pub fn #name(&mut self, item: #ty) -> &mut Self {
+                        self.#name = item;
+                        self
+                    }
+                }
+            } else {
+                let ty = single_generic_type_of(&field, "Option").unwrap_or(field.ty);
+                quote! {
+                    pub fn #name(&mut self, item: #ty) -> &mut Self {
+                        self.#name = Some(item);
+                        self
+                    }
                 }
             }
         })
@@ -214,6 +279,46 @@ fn ts_builder_impl_fields_fn(input: &DeriveInput) -> TokenStream {
     quote! {
         impl #builder_name {
             #builder_fn_fields
+        }
+    }
+}
+
+/// This function returns `TokenStream` which represents
+/// a code such as
+/// ```ignore
+/// impl CommandBuilder {
+///     pub fn args(&mut self, item: String) -> &mut Self {
+///         self.args.push(item);
+///         self
+///     }
+/// }
+/// ```
+fn ts_builder_impl_each_field_fn(input: &DeriveInput) -> TokenStream {
+    let builder_name = builder_name(input);
+    let builder_funcs: TokenStream = origin_fields(input)
+        .filter_map(|field| builder_attr_each(&field).map(|s| (field, s)))
+        .map(|(field, each_fn_name_str)| {
+            let each_fn_name = syn::Ident::new(
+                each_fn_name_str.value().as_ref(),
+                proc_macro2::Span::call_site(),
+            );
+            let name = field.ident.as_ref().unwrap();
+            let ty = single_generic_type_of(&field, "Vec").expect(
+                "#[builder(each = \"...\")] attribute is only able to be set on `Vec` type",
+            );
+
+            quote! {
+                pub fn #each_fn_name(&mut self, item: #ty) -> &mut Self {
+                    self.#name.push(item);
+                    self
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #builder_name {
+            #builder_funcs
         }
     }
 }
@@ -245,10 +350,14 @@ fn ts_builder_impl_build_fn(input: &DeriveInput) -> TokenStream {
     let builder_fn_inner: TokenStream = origin_fields(input)
         .map(|field| {
             let name = field.ident.as_ref().unwrap();
-            if generics_of_option_type(&field).is_some() {
+            if single_generic_type_of(&field, "Option").is_some() {
                 // optional field
                 quote! {
                     #name: self.#name.take(),
+                }
+            } else if single_generic_type_of(&field, "Vec").is_some() {
+                quote! {
+                    #name: std::mem::replace(&mut self.#name, Vec::new()),
                 }
             } else {
                 // required field
