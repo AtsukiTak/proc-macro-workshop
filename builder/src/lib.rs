@@ -171,16 +171,16 @@ fn ts_builder_struct(input: &DeriveInput) -> TokenStream {
             let name = field.ident.as_ref().unwrap();
             if let Some(ty) = single_generic_type_of(&field, "Option") {
                 quote! {
-                    #name: Option<#ty>,
+                    #name: std::option::Option<#ty>,
                 }
             } else if let Some(ty) = single_generic_type_of(&field, "Vec") {
                 quote! {
-                    #name: Vec<#ty>,
+                    #name: std::vec::Vec<#ty>,
                 }
             } else {
                 let ty = field.ty;
                 quote! {
-                    #name : Option<#ty>,
+                    #name : std::option::Option<#ty>,
                 }
             }
         })
@@ -213,11 +213,11 @@ fn ts_builder_impl_new_fn(input: &DeriveInput) -> TokenStream {
             let name = field.ident.as_ref().unwrap();
             if single_generic_type_of(&field, "Vec").is_some() {
                 quote! {
-                    #name: Vec::new(),
+                    #name: std::vec::Vec::new(),
                 }
             } else {
                 quote! {
-                    #name: None,
+                    #name: std::option::Option::None,
                 }
             }
         })
@@ -367,7 +367,7 @@ fn ts_builder_impl_build_fn(input: &DeriveInput) -> TokenStream {
                 }
             } else if single_generic_type_of(&field, "Vec").is_some() {
                 quote! {
-                    #name: std::mem::replace(&mut self.#name, Vec::new()),
+                    #name: std::mem::replace(&mut self.#name, std::vec::Vec::new()),
                 }
             } else {
                 // required field
@@ -383,7 +383,7 @@ fn ts_builder_impl_build_fn(input: &DeriveInput) -> TokenStream {
         pub struct BuildError();
 
         impl #builder_name {
-            fn build(&mut self) -> Result<#origin_name, BuildError>
+            fn build(&mut self) -> std::result::Result<#origin_name, BuildError>
             {
                 Ok(#origin_name {
                     #builder_fn_inner
