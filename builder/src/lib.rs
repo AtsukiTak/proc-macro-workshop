@@ -100,17 +100,23 @@ fn get_builder_meta_items<'a>(field: &'a syn::Field) -> impl Iterator<Item = syn
 
 /// Look for `#[builder(each = "...")]` attribute and get the
 /// value of "...".
-fn builder_attr_each(field: &syn::Field) -> Option<syn::LitStr> {
+fn builder_attr_each(field: &syn::Field) -> Option<Result<syn::LitStr, syn::Error>> {
     get_builder_meta_items(field).find_map(|meta| match meta {
         syn::NestedMeta::Meta(syn::Meta::NameValue(syn::MetaNameValue {
             ref path,
             lit: syn::Lit::Str(ref s),
             ..
-        })) if is_path_eq(path, "each") => Some(s.clone()),
-        i => {
-            eprintln!("{:#?}", i);
-            None
+        })) => {
+            if is_path_eq(path, "each") {
+                Some(Ok(s.clone()))
+            } else {
+                Some(Err(syn::Error::new_spanned(
+                    meta,
+                    "expected `builder(each = \"...\")`",
+                )))
+            }
         }
+        _ => None,
     })
 }
 
@@ -249,7 +255,7 @@ fn ts_builder_impl_fields_fn(input: &DeriveInput) -> TokenStream {
         .filter(|field| {
             // #[builder(each = "...")] の値と同じ場合はスキップする
             match builder_attr_each(field) {
-                Some(ref s) => *field.ident.as_ref().unwrap() != s.value(),
+                Some(Ok(ref s)) => *field.ident.as_ref().unwrap() != s.value(),
                 _ => true,
             }
         })
@@ -296,23 +302,27 @@ fn ts_builder_impl_fields_fn(input: &DeriveInput) -> TokenStream {
 fn ts_builder_impl_each_field_fn(input: &DeriveInput) -> TokenStream {
     let builder_name = builder_name(input);
     let builder_funcs: TokenStream = origin_fields(input)
-        .filter_map(|field| builder_attr_each(&field).map(|s| (field, s)))
-        .map(|(field, each_fn_name_str)| {
-            let each_fn_name = syn::Ident::new(
-                each_fn_name_str.value().as_ref(),
-                proc_macro2::Span::call_site(),
-            );
-            let name = field.ident.as_ref().unwrap();
-            let ty = single_generic_type_of(&field, "Vec").expect(
-                "#[builder(each = \"...\")] attribute is only able to be set on `Vec` type",
-            );
+        .filter_map(|field| match builder_attr_each(&field) {
+            Some(Err(e)) => Some(e.to_compile_error()),
+            Some(Ok(each_fn_name_str)) => {
+                let each_fn_name = syn::Ident::new(
+                    each_fn_name_str.value().as_ref(),
+                    proc_macro2::Span::call_site(),
+                );
+                let name = field.ident.as_ref().unwrap();
+                let ty = single_generic_type_of(&field, "Vec").expect(
+                    "#[builder(each = \"...\")] attribute is only able to be set on `Vec` type",
+                );
 
-            quote! {
-                pub fn #each_fn_name(&mut self, item: #ty) -> &mut Self {
-                    self.#name.push(item);
-                    self
-                }
+                let ts = quote! {
+                    pub fn #each_fn_name(&mut self, item: #ty) -> &mut Self {
+                        self.#name.push(item);
+                        self
+                    }
+                };
+                Some(ts)
             }
+            None => None,
         })
         .collect();
 
